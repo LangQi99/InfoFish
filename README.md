@@ -177,8 +177,8 @@ for (const block of data.blocks) {
 | `keyword` | string | 空 | 标题关键词过滤,大小写不敏感 |
 | `download` | bool | `true` | `false` 时不返回 `Content-Disposition`,直接在浏览器内显示 |
 | `deep` | bool | `false` | **深度导出**:抓取每条 URL 正文并附 summary + keywords |
-| `deep_limit` | int 1–100 | `30` | 深度模式下最多解析的条目总数 (按筛选后顺序截断,防止全量抓取过慢) |
-| `deep_concurrency` | int 1–16 | `5` | 深度模式并发抓取数 |
+| `deep_limit` | int 1–500 | `500` | 深度模式下最多解析的条目总数 (按筛选后顺序截断) |
+| `deep_concurrency` | int 1–32 | `10` | 深度模式并发抓取数 |
 
 **示例**
 
@@ -199,7 +199,7 @@ curl "http://127.0.0.1:47821/api/export.txt?sources=36kr-renqi&limit=5&deep=true
 **普通导出返回示例**
 
 ```
-🔥 全网舆情速览 · 2026-05-02 21:08:55
+全网舆情速览 · 2026-05-02 21:08:55
 共 1 个源 / 3 条热点
 
 【知乎热榜】
@@ -210,23 +210,25 @@ curl "http://127.0.0.1:47821/api/export.txt?sources=36kr-renqi&limit=5&deep=true
 
 **深度导出 (`deep=true`)**
 
-每条热点下追加三行:`🔗 URL` / `📝 摘要` / `🏷️ 关键词`。失败 (反爬 403、超时、无正文等) 会标 `⚠️ 解析失败`,不影响其它条目。
+成功的条目在标题下追加一行摘要 (源站正文起始几句,封顶 240 字);解析失败 (反爬 403、超时、SPA 占位等) 或被黑名单跳过的条目只保留标题。导出文本不含任何 emoji、URL、关键词或错误提示——保持纯文本简洁。
 
-实现:`httpx` 抓 HTML → `trafilatura` 抽正文/标题 → 中文用 `jieba` TF-IDF 取 8 个关键词,英文用频率法;摘要为正文前 3 句,封顶 240 字。
+实现:`httpx` 抓 HTML → `trafilatura` 抽正文/标题 → 启发式校验是否真正文 → 摘要为正文前 3 句。关键词与原始 URL 仅在 SSE 进度面板与 `/api/hot` JSON 里返回,不进入 TXT。
 
 ```
-���36氪人气榜】
-1. 8 点 1 氪丨MCN 机构回应女孩挪用上千万打赏主播…
-   🔗 https://36kr.com/p/3777227930224900
-   📝 8 点 1 氪丨MCN 机构回应女孩挪用上千万打赏主播；苹果更换 CEO 原因曝光…
-   🏷️ 36, 2026, 苹果, 微信, 面板
+【百度热搜】
+1. 张雪机车再夺冠军
+   张雪机车，再次夺冠！上次夺冠的奖杯、复刻赛车等已被拍卖…
+
+【B站热搜】
+1. AL战胜IG LPL第二赛段
+2. EDG战胜DRG VCT第一赛段
 ```
 
 注意事项:
-- 深度导出会真去逐条抓 URL,**比普通导出慢得多**;`deep_limit` 是兜底,默认 30 条
+- 深度导出会真去逐条抓 URL,**比普通导出慢得多**;`deep_limit` 默认 `500` 等于"全量",可按需要减小
 - 部分平台 (微博 / 知乎 / 抖音 / 头条 等) 反爬严格,大概率 403 / JS 渲染拿不到正文,这是正常现象
 - 内存中没有为深度结果做缓存,重复请求会重复抓取
-- 标题第二行的 `📝` 段是源站正文起始几句,不是 LLM 生成的语义摘要
+- TXT 输出只保留 标题 + 摘要,无 emoji / URL / 关键词 / 失败提示;如需查看请用 SSE 接口或前端进度面板
 
 **深度抓取过滤策略**
 
@@ -250,7 +252,7 @@ curl "http://127.0.0.1:47821/api/export.txt?sources=36kr-renqi&limit=5&deep=true
 | `done` | `{ text, filename }` | 全部完成,返回最终拼好的 TXT 文本与建议文件名 |
 | `error` | `{ detail }` | 上游错误,流终止 |
 
-并发由 `deep_concurrency` 控制 (默认 5,最大 16),后端用 `asyncio.Semaphore` 限流。
+并发由 `deep_concurrency` 控制 (默认 10,最大 32),后端用 `asyncio.Semaphore` 限流。
 
 **前端使用示例**
 

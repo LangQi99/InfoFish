@@ -166,7 +166,7 @@ def _render_text(
     deep: bool,
 ) -> str:
     lines: list[str] = []
-    lines.append(f"🔥 全网舆情速览 · {ts_human}")
+    lines.append(f"全网舆情速览 · {ts_human}")
     total = sum(len(rows) for _, _, rows in blocks)
     parts: list[str] = []
     if keyword.strip():
@@ -186,14 +186,8 @@ def _render_text(
             lines.append(f"{rank}. {title}{tail}")
             if deep and not skipped and url in deep_map:
                 info = deep_map[url]
-                lines.append(f"   🔗 {url}")
-                if "error" in info:
-                    lines.append(f"   ⚠️ 解析失败: {info['error']}")
-                else:
-                    if info.get("summary"):
-                        lines.append(f"   📝 {info['summary']}")
-                    if info.get("keywords"):
-                        lines.append(f"   🏷️ {', '.join(info['keywords'])}")
+                if "error" not in info and info.get("summary"):
+                    lines.append(f"   {info['summary']}")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -214,8 +208,8 @@ async def export_txt(
     keyword: str = Query(default=""),
     download: bool = Query(default=True),
     deep: bool = Query(default=False),
-    deep_limit: int = Query(default=30, ge=1, le=100),
-    deep_concurrency: int = Query(default=5, ge=1, le=16),
+    deep_limit: int = Query(default=500, ge=1, le=500),
+    deep_concurrency: int = Query(default=10, ge=1, le=32),
 ) -> PlainTextResponse:
     """导出当前热点汇总为纯文本 (text/plain)。
 
@@ -257,8 +251,8 @@ async def export_stream(
     with_heat: bool = Query(default=False),
     keyword: str = Query(default=""),
     deep: bool = Query(default=True),
-    deep_limit: int = Query(default=30, ge=1, le=100),
-    deep_concurrency: int = Query(default=5, ge=1, le=16),
+    deep_limit: int = Query(default=500, ge=1, le=500),
+    deep_concurrency: int = Query(default=10, ge=1, le=32),
 ) -> StreamingResponse:
     """SSE 流式导出。事件类型:
 
