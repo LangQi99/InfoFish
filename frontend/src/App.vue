@@ -44,7 +44,23 @@ let timer: number | null = null
 const summaryOpen = ref(true)
 const summaryScope = ref<'filtered' | 'all'>('filtered')
 const summaryWithHeat = ref(false)
+const summaryDeep = ref(false)
 const exportTip = ref('')
+
+interface DeepProgressItem {
+  url: string
+  title: string
+  source: string
+  status: 'pending' | 'ok' | 'fail'
+  summary?: string
+  keywords?: string[]
+  error?: string
+}
+const deepRunning = ref(false)
+const deepDone = ref(0)
+const deepTotal = ref(0)
+const deepItems = ref<DeepProgressItem[]>([])
+let deepES: EventSource | null = null
 
 const categories = computed(() => {
   const set = new Set(sources.value.map(s => s.category))
@@ -105,28 +121,100 @@ const summaryText = computed(() => {
   return lines.join('\n').trimEnd()
 })
 
+function buildExportParams(): URLSearchParams {
+  const params = new URLSearchParams()
+  params.set('limit', '20')
+  if (summaryWithHeat.value) params.set('with_heat', 'true')
+  if (summaryScope.value === 'filtered') {
+    const ids = summaryBlocks.value.map(b => b.source_id)
+    for (const id of ids) params.append('sources', id)
+    const kw = keyword.value.trim()
+    if (kw) params.set('keyword', kw)
+  }
+  return params
+}
+
+function downloadText(text: string, filename: string) {
+  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
+}
+
+function cancelDeep() {
+  if (deepES) { deepES.close(); deepES = null }
+  deepRunning.value = false
+  exportTip.value = '已取消'
+  setTimeout(() => (exportTip.value = ''), 2000)
+}
+
 async function exportSummary() {
-  if (summaryItemCount.value === 0) return
-  try {
-    const params = new URLSearchParams()
-    params.set('limit', '20')
-    if (summaryWithHeat.value) params.set('with_heat', 'true')
-    if (summaryScope.value === 'filtered') {
-      const ids = summaryBlocks.value.map(b => b.source_id)
-      for (const id of ids) params.append('sources', id)
-      const kw = keyword.value.trim()
-      if (kw) params.set('keyword', kw)
-    }
+  if (summaryItemCount.value === 0 || deepRunning.value) return
+  const params = buildExportParams()
+
+  if (!summaryDeep.value) {
     const a = document.createElement('a')
     a.href = `/api/export.txt?${params.toString()}`
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
+    document.body.appendChild(a); a.click(); document.body.removeChild(a)
     exportTip.value = '✓ 已导出'
-  } catch {
-    exportTip.value = '导出失败'
+    setTimeout(() => (exportTip.value = ''), 2000)
+    return
   }
-  setTimeout(() => (exportTip.value = ''), 2000)
+
+  // 深度导出:SSE 流式 + 进度可视化
+  params.set('deep', 'true')
+  deepRunning.value = true
+  deepDone.value = 0
+  deepTotal.value = 0
+  deepItems.value = []
+  exportTip.value = ''
+
+  const es = new EventSource(`/api/export.stream?${params.toString()}`)
+  deepES = es
+  const idx: Record<string, number> = {}
+
+  es.addEventListener('meta', e => {
+    const d = JSON.parse((e as MessageEvent).data)
+    deepTotal.value = d.total
+    deepItems.value = d.urls.map((u: any, i: number) => {
+      idx[u.url] = i
+      return { url: u.url, title: u.title, source: u.source, status: 'pending' as const }
+    })
+  })
+  es.addEventListener('progress', e => {
+    const d = JSON.parse((e as MessageEvent).data)
+    deepDone.value = d.done
+    const i = idx[d.url]
+    if (i === undefined) return
+    const item = deepItems.value[i]
+    if (d.ok) {
+      item.status = 'ok'
+      item.summary = d.summary
+      item.keywords = d.keywords
+    } else {
+      item.status = 'fail'
+      item.error = d.error
+    }
+  })
+  es.addEventListener('done', e => {
+    const d = JSON.parse((e as MessageEvent).data)
+    downloadText(d.text, d.filename)
+    es.close(); deepES = null
+    deepRunning.value = false
+    exportTip.value = '✓ 已导出'
+    setTimeout(() => (exportTip.value = ''), 2500)
+  })
+  es.addEventListener('error', () => {
+    es.close(); deepES = null
+    deepRunning.value = false
+    exportTip.value = '导出失败 / 连接中断'
+    setTimeout(() => (exportTip.value = ''), 4000)
+  })
 }
 
 async function loadSources() {
@@ -181,13 +269,16 @@ onMounted(async () => {
   await loadSources()
   await loadHot()
 })
-onUnmounted(() => { if (timer) clearInterval(timer) })
+onUnmounted(() => {
+  if (timer) clearInterval(timer)
+  if (deepES) { deepES.close(); deepES = null }
+})
 </script>
 
 <template>
   <div class="app">
     <header class="app-header">
-      <h1><span class="dot"></span> BettaFish · 舆情面板</h1>
+      <h1><span class="dot"></span> InfoFish · 舆情面板</h1>
       <div class="meta">
         <span v-if="fetchedAt">更新于 {{ fmtTime(fetchedAt) }}</span>
         <span v-if="cached" style="margin-left:8px">· 缓存</span>
@@ -215,9 +306,58 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
           <label>
             <input type="checkbox" v-model="summaryWithHeat" /> 附带热度
           </label>
+          <label :title="'深度导出会抓取每条 URL 的正文,生成摘要 + 关键词,耗时较长'">
+            <input type="checkbox" v-model="summaryDeep" /> 深度导出
+          </label>
           <span style="flex:1"></span>
           <span v-if="exportTip" style="color:var(--accent-2);font-size:12px">{{ exportTip }}</span>
-          <button :disabled="summaryItemCount === 0" @click="exportSummary">⬇️ 导出 TXT</button>
+          <button
+            class="btn-export"
+            :disabled="summaryItemCount === 0 || deepRunning"
+            @click="exportSummary"
+          >
+            <span v-if="deepRunning" class="spinner"></span>
+            {{ deepRunning ? `深度导出中 ${deepDone}/${deepTotal}` : '⬇️ 导出 TXT' }}
+          </button>
+          <button
+            v-if="deepRunning"
+            class="btn-cancel"
+            @click="cancelDeep"
+          >取消</button>
+        </div>
+
+        <div v-if="deepRunning || deepItems.length > 0" class="deep-panel">
+          <div class="deep-bar-wrap">
+            <div
+              class="deep-bar"
+              :style="{ width: deepTotal ? (deepDone / deepTotal * 100) + '%' : '0%' }"
+            ></div>
+            <span class="deep-bar-label">
+              {{ deepDone }} / {{ deepTotal }}
+              · ✓ {{ deepItems.filter(i => i.status === 'ok').length }}
+              · ✗ {{ deepItems.filter(i => i.status === 'fail').length }}
+            </span>
+          </div>
+          <ul class="deep-list">
+            <li v-for="it in deepItems" :key="it.url" class="deep-item" :class="it.status">
+              <span class="deep-status">
+                <template v-if="it.status === 'pending'">⏳</template>
+                <template v-else-if="it.status === 'ok'">✅</template>
+                <template v-else>⚠️</template>
+              </span>
+              <div class="deep-body">
+                <div class="deep-title">
+                  <span class="deep-source">[{{ it.source }}]</span>
+                  <a :href="it.url" target="_blank" rel="noopener noreferrer">{{ it.title }}</a>
+                </div>
+                <div v-if="it.status === 'ok'" class="deep-summary">{{ it.summary }}</div>
+                <div v-if="it.status === 'ok' && it.keywords && it.keywords.length" class="deep-keywords">
+                  <span v-for="k in it.keywords" :key="k" class="deep-kw">{{ k }}</span>
+                </div>
+                <div v-else-if="it.status === 'fail'" class="deep-error">解析失败: {{ it.error }}</div>
+              </div>
+            </li>
+          </ul>
         </div>
         <textarea class="summary-text" :value="summaryText" readonly spellcheck="false"></textarea>
       </div>

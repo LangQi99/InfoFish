@@ -2,17 +2,19 @@
 from __future__ import annotations
 
 import time
+import json
 from datetime import datetime
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 
+from .article import ArticleError, analyze_many, analyze_many_iter
 from .news import HotItem, NewsNowError, fetch_hot
 from .sources import DEFAULT_SOURCE_IDS, SOURCE_NAME_BY_ID, SOURCES
 
-app = FastAPI(title="BettaFish 舆情后端", version="0.1.0")
+app = FastAPI(title="InfoFish 舆情后端", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -102,6 +104,94 @@ def _item_dict(it: HotItem, rank: int) -> dict[str, Any]:
     return d
 
 
+# 行格式: (rank, title, url, heat)
+Row = tuple[int, str, str, str | None]
+# 块格式: (source_name, [Row, ...])
+RenderedBlock = tuple[str, list[Row]]
+
+
+def _collect_rows(
+    raw: dict[str, list[HotItem]],
+    selected: list[str],
+    limit: int,
+    keyword: str,
+) -> tuple[list[RenderedBlock], int]:
+    kw = keyword.strip().lower()
+    blocks: list[RenderedBlock] = []
+    total = 0
+    for sid in selected:
+        items = raw.get(sid, [])[:limit]
+        rows: list[Row] = []
+        for idx, it in enumerate(items, 1):
+            if kw and kw not in it.title.lower():
+                continue
+            rows.append((idx, it.title, it.url, it.heat))
+        if rows:
+            blocks.append((SOURCE_NAME_BY_ID.get(sid, sid), rows))
+            total += len(rows)
+    return blocks, total
+
+
+def _flatten_urls(blocks: list[RenderedBlock], cap: int) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for _, rows in blocks:
+        for _, _, url, _ in rows:
+            if url and url not in seen:
+                seen.add(url)
+                out.append(url)
+                if len(out) >= cap:
+                    return out
+    return out
+
+
+def _render_text(
+    blocks: list[RenderedBlock],
+    deep_map: dict[str, dict[str, Any]],
+    ts_human: str,
+    keyword: str,
+    with_heat: bool,
+    deep: bool,
+) -> str:
+    lines: list[str] = []
+    lines.append(f"🔥 全网舆情速览 · {ts_human}")
+    total = sum(len(rows) for _, rows in blocks)
+    parts: list[str] = []
+    if keyword.strip():
+        parts.append("已过滤")
+    if deep:
+        ok = len([v for v in deep_map.values() if "error" not in v])
+        parts.append(f"深度 {ok}/{len(deep_map)} 成功")
+    suffix = f" ({', '.join(parts)})" if parts else ""
+    lines.append(f"共 {len(blocks)} 个源 / {total} 条热点{suffix}")
+    lines.append("")
+    for name, rows in blocks:
+        lines.append(f"【{name}】")
+        for rank, title, url, heat in rows:
+            tail = f"  · {heat}" if with_heat and heat else ""
+            lines.append(f"{rank}. {title}{tail}")
+            if deep and url in deep_map:
+                info = deep_map[url]
+                lines.append(f"   🔗 {url}")
+                if "error" in info:
+                    lines.append(f"   ⚠️ 解析失败: {info['error']}")
+                else:
+                    if info.get("summary"):
+                        lines.append(f"   📝 {info['summary']}")
+                    if info.get("keywords"):
+                        lines.append(f"   🏷️ {', '.join(info['keywords'])}")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _filename(deep: bool, ts: int) -> str:
+    suffix_tag = "-deep" if deep else ""
+    return (
+        f"InfoFish-summary{suffix_tag}-"
+        f"{datetime.fromtimestamp(ts).strftime('%Y%m%d%H%M%S')}.txt"
+    )
+
+
 @app.get("/api/export.txt", response_class=PlainTextResponse)
 async def export_txt(
     sources: list[str] | None = Query(default=None),
@@ -109,14 +199,14 @@ async def export_txt(
     with_heat: bool = Query(default=False),
     keyword: str = Query(default=""),
     download: bool = Query(default=True),
+    deep: bool = Query(default=False),
+    deep_limit: int = Query(default=30, ge=1, le=100),
+    deep_concurrency: int = Query(default=5, ge=1, le=16),
 ) -> PlainTextResponse:
     """导出当前热点汇总为纯文本 (text/plain)。
 
-    - sources: 限定源 id;为空时使用全部默认源
-    - limit:   每个源最多多少条
-    - with_heat: 是否在每条后面附带热度
-    - keyword: 标题关键词过滤 (大小写不敏感,不区分空白)
-    - download: true 时附带 Content-Disposition 触发浏览器下载
+    深度导出推荐使用 /api/export.stream (SSE 进度);本端点深度模式会一次性等到
+    全部完成后再返回,客户端没有进度反馈。
     """
     selected = sources or DEFAULT_SOURCE_IDS
     try:
@@ -124,38 +214,106 @@ async def export_txt(
     except NewsNowError as e:
         raise HTTPException(status_code=502, detail=str(e)) from e
 
-    kw = keyword.strip().lower()
+    blocks, _ = _collect_rows(raw, selected, limit, keyword)
     now = int(time.time())
     ts_human = datetime.fromtimestamp(now).strftime("%Y-%m-%d %H:%M:%S")
 
-    rendered_blocks: list[tuple[str, list[tuple[int, str, str | None]]]] = []
-    total = 0
-    for sid in selected:
-        items = raw.get(sid, [])[:limit]
-        rows: list[tuple[int, str, str | None]] = []
-        for idx, it in enumerate(items, 1):
-            if kw and kw not in it.title.lower():
-                continue
-            rows.append((idx, it.title, it.heat))
-        if rows:
-            rendered_blocks.append((SOURCE_NAME_BY_ID.get(sid, sid), rows))
-            total += len(rows)
+    deep_map: dict[str, dict[str, Any]] = {}
+    if deep:
+        urls = _flatten_urls(blocks, deep_limit)
+        results = await analyze_many(urls, concurrency=deep_concurrency)
+        for url, res in zip(urls, results):
+            if isinstance(res, ArticleError):
+                deep_map[url] = {"error": str(res)}
+            else:
+                deep_map[url] = res.to_dict()
 
-    lines: list[str] = []
-    lines.append(f"🔥 全网舆情速览 · {ts_human}")
-    suffix = " (已过滤)" if kw else ""
-    lines.append(f"共 {len(rendered_blocks)} 个源 / {total} 条热点{suffix}")
-    lines.append("")
-    for name, rows in rendered_blocks:
-        lines.append(f"【{name}】")
-        for rank, title, heat in rows:
-            tail = f"  · {heat}" if with_heat and heat else ""
-            lines.append(f"{rank}. {title}{tail}")
-        lines.append("")
-    text = "\n".join(lines).rstrip() + "\n"
+    text = _render_text(blocks, deep_map, ts_human, keyword, with_heat, deep)
 
     headers: dict[str, str] = {}
     if download:
-        fname = f"bettafish-summary-{datetime.fromtimestamp(now).strftime('%Y%m%d%H%M%S')}.txt"
-        headers["Content-Disposition"] = f'attachment; filename="{fname}"'
+        headers["Content-Disposition"] = f'attachment; filename="{_filename(deep, now)}"'
     return PlainTextResponse(text, headers=headers, media_type="text/plain; charset=utf-8")
+
+
+@app.get("/api/export.stream")
+async def export_stream(
+    sources: list[str] | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+    with_heat: bool = Query(default=False),
+    keyword: str = Query(default=""),
+    deep: bool = Query(default=True),
+    deep_limit: int = Query(default=30, ge=1, le=100),
+    deep_concurrency: int = Query(default=5, ge=1, le=16),
+) -> StreamingResponse:
+    """SSE 流式导出。事件类型:
+
+    - `meta`     {total, urls: [{url,title,source}], filename}
+    - `progress` {url, ok, title?, summary?, keywords?, error?, done, total}
+    - `done`     {text, filename}
+    - `error`    {detail}
+    """
+    selected = sources or DEFAULT_SOURCE_IDS
+
+    async def gen():
+        try:
+            raw = await fetch_hot(selected)
+        except NewsNowError as e:
+            yield _sse("error", {"detail": str(e)})
+            return
+
+        blocks, _ = _collect_rows(raw, selected, limit, keyword)
+        now = int(time.time())
+        ts_human = datetime.fromtimestamp(now).strftime("%Y-%m-%d %H:%M:%S")
+        urls = _flatten_urls(blocks, deep_limit) if deep else []
+
+        # 给前端一份 url->title 映射,渲染进度列表
+        url_meta: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for src_name, rows in blocks:
+            for _, title, url, _ in rows:
+                if url and url in urls and url not in seen:
+                    seen.add(url)
+                    url_meta.append({"url": url, "title": title, "source": src_name})
+
+        filename = _filename(deep, now)
+        yield _sse("meta", {
+            "total": len(urls),
+            "urls": url_meta,
+            "filename": filename,
+            "deep": deep,
+        })
+
+        deep_map: dict[str, dict[str, Any]] = {}
+        if deep and urls:
+            done = 0
+            async for url, res in analyze_many_iter(urls, concurrency=deep_concurrency):
+                done += 1
+                if isinstance(res, ArticleError):
+                    deep_map[url] = {"error": str(res)}
+                    yield _sse("progress", {
+                        "url": url, "ok": False, "error": str(res),
+                        "done": done, "total": len(urls),
+                    })
+                else:
+                    deep_map[url] = res.to_dict()
+                    yield _sse("progress", {
+                        "url": url, "ok": True,
+                        "title": res.title,
+                        "summary": res.summary,
+                        "keywords": res.keywords,
+                        "done": done, "total": len(urls),
+                    })
+
+        text = _render_text(blocks, deep_map, ts_human, keyword, with_heat, deep)
+        yield _sse("done", {"text": text, "filename": filename})
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+def _sse(event: str, data: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
