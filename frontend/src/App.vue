@@ -44,8 +44,10 @@ let timer: number | null = null
 const summaryOpen = ref(true)
 const summaryScope = ref<'filtered' | 'all'>('filtered')
 const summaryWithHeat = ref(false)
-const summaryDeep = ref(false)
 const exportTip = ref('')
+
+// 深度抓取黑名单 (与后端 DEEP_BLACKLIST 保持一致)
+const DEEP_BLACKLIST = new Set(['weibo', 'zhihu', 'producthunt', 'steam', 'tieba'])
 
 interface DeepProgressItem {
   url: string
@@ -61,6 +63,8 @@ const deepDone = ref(0)
 const deepTotal = ref(0)
 const deepItems = ref<DeepProgressItem[]>([])
 const deepSkipped = ref<string[]>([])
+// per-URL 摘要缓存,导出和总结预览都从这里取
+const deepCache = ref<Map<string, string>>(new Map())
 let deepES: EventSource | null = null
 
 const categories = computed(() => {
@@ -99,40 +103,37 @@ const summaryItemCount = computed(() =>
 )
 
 const summaryText = computed(() => {
+  // 引用 deepCache 让其内容更新时重新计算
+  const cache = deepCache.value
   const bs = summaryBlocks.value
   if (bs.length === 0) return ''
   const ts = fetchedAt.value ? fmtTime(fetchedAt.value) : '-'
   const lines: string[] = []
-  lines.push(`🔥 全网舆情速览 · ${ts}`)
-  lines.push(
-    `共 ${bs.length} 个源 / ${summaryItemCount.value} 条热点` +
-      (summaryScope.value === 'filtered' && (activeCategory.value !== '全部' || keyword.value.trim())
-        ? ' (已过滤)'
-        : ''),
-  )
+  const filtered = summaryScope.value === 'filtered' &&
+    (activeCategory.value !== '全部' || keyword.value.trim())
+  lines.push(`全网舆情速览 · ${ts}`)
+  lines.push(`共 ${bs.length} 个源 / ${summaryItemCount.value} 条热点${filtered ? ' (已过滤)' : ''}`)
   lines.push('')
   for (const b of bs) {
-    lines.push(`【${b.source_name}】`)
+    const skipped = DEEP_BLACKLIST.has(b.source_id)
+    lines.push(`【${b.source_name}】${skipped ? '  (已跳过深度抓取)' : ''}`)
     for (const it of b.items) {
       const heat = summaryWithHeat.value && it.heat ? `  · ${it.heat}` : ''
       lines.push(`${it.rank}. ${it.title}${heat}`)
+      if (!skipped) {
+        const summary = cache.get(it.url)
+        if (summary) lines.push(`   ${summary}`)
+      }
     }
     lines.push('')
   }
   return lines.join('\n').trimEnd()
 })
 
-function buildExportParams(): URLSearchParams {
-  const params = new URLSearchParams()
-  params.set('limit', '20')
-  if (summaryWithHeat.value) params.set('with_heat', 'true')
-  if (summaryScope.value === 'filtered') {
-    const ids = summaryBlocks.value.map(b => b.source_id)
-    for (const id of ids) params.append('sources', id)
-    const kw = keyword.value.trim()
-    if (kw) params.set('keyword', kw)
-  }
-  return params
+function fmtFilenameTs(ts: number): string {
+  const d = new Date((ts || Date.now() / 1000) * 1000)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
 }
 
 function downloadText(text: string, filename: string) {
@@ -147,36 +148,26 @@ function downloadText(text: string, filename: string) {
   URL.revokeObjectURL(url)
 }
 
-function cancelDeep() {
-  if (deepES) { deepES.close(); deepES = null }
-  deepRunning.value = false
-  exportTip.value = '已取消'
+function exportSummary() {
+  if (summaryItemCount.value === 0 || deepRunning.value) return
+  const text = summaryText.value
+  if (!text) return
+  downloadText(text, `infofish-summary-${fmtFilenameTs(fetchedAt.value)}.txt`)
+  exportTip.value = '✓ 已导出'
   setTimeout(() => (exportTip.value = ''), 2000)
 }
 
-async function exportSummary() {
-  if (summaryItemCount.value === 0 || deepRunning.value) return
-  const params = buildExportParams()
-
-  if (!summaryDeep.value) {
-    const a = document.createElement('a')
-    a.href = `/api/export.txt?${params.toString()}`
-    document.body.appendChild(a); a.click(); document.body.removeChild(a)
-    exportTip.value = '✓ 已导出'
-    setTimeout(() => (exportTip.value = ''), 2000)
-    return
-  }
-
-  // 深度导出:SSE 流式 + 进度可视化
-  params.set('deep', 'true')
+function startDeep() {
+  if (deepES) { deepES.close(); deepES = null }
   deepRunning.value = true
   deepDone.value = 0
   deepTotal.value = 0
   deepItems.value = []
   deepSkipped.value = []
+  deepCache.value = new Map()
   exportTip.value = ''
 
-  const es = new EventSource(`/api/export.stream?${params.toString()}`)
+  const es = new EventSource('/api/export.stream')
   deepES = es
   const idx: Record<string, number> = {}
 
@@ -199,23 +190,23 @@ async function exportSummary() {
       item.status = 'ok'
       item.summary = d.summary
       item.keywords = d.keywords
+      // 触发 summaryText 重算 (Map 自身不是响应式触发器,需重赋值)
+      const next = new Map(deepCache.value)
+      next.set(d.url, d.summary || '')
+      deepCache.value = next
     } else {
       item.status = 'fail'
       item.error = d.error
     }
   })
-  es.addEventListener('done', e => {
-    const d = JSON.parse((e as MessageEvent).data)
-    downloadText(d.text, d.filename)
+  es.addEventListener('done', () => {
     es.close(); deepES = null
     deepRunning.value = false
-    exportTip.value = '✓ 已导出'
-    setTimeout(() => (exportTip.value = ''), 2500)
   })
   es.addEventListener('error', () => {
     es.close(); deepES = null
     deepRunning.value = false
-    exportTip.value = '导出失败 / 连接中断'
+    exportTip.value = '深度抓取中断'
     setTimeout(() => (exportTip.value = ''), 4000)
   })
 }
@@ -244,6 +235,8 @@ async function loadHot(fresh = false) {
     fetchedAt.value = d.fetched_at
     cached.value = d.cached
     totalItems.value = d.total_items
+    // 数据更新后自动重跑深度抓取
+    startDeep()
   } catch (e: any) {
     error.value = e?.message || String(e)
   } finally {
@@ -309,9 +302,6 @@ onUnmounted(() => {
           <label>
             <input type="checkbox" v-model="summaryWithHeat" /> 附带热度
           </label>
-          <label :title="'深度导出会抓取每条 URL 的正文,生成摘要 + 关键词,耗时较长'">
-            <input type="checkbox" v-model="summaryDeep" /> 深度导出
-          </label>
           <span style="flex:1"></span>
           <span v-if="exportTip" style="color:var(--accent-2);font-size:12px">{{ exportTip }}</span>
           <button
@@ -320,13 +310,8 @@ onUnmounted(() => {
             @click="exportSummary"
           >
             <span v-if="deepRunning" class="spinner"></span>
-            {{ deepRunning ? `深度导出中 ${deepDone}/${deepTotal}` : '⬇️ 导出 TXT' }}
+            {{ deepRunning ? `深度抓取中 ${deepDone}/${deepTotal}` : '⬇️ 导出 TXT' }}
           </button>
-          <button
-            v-if="deepRunning"
-            class="btn-cancel"
-            @click="cancelDeep"
-          >取消</button>
         </div>
 
         <div v-if="deepRunning || deepItems.length > 0" class="deep-panel">

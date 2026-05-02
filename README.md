@@ -26,6 +26,13 @@ npm run dev
 
 打开 http://localhost:51327。Vite 已配置 `/api` 代理到 `127.0.0.1:47821`,无需改代码即可联调。
 
+## 前端行为
+
+- 首次进入 / 点击 "立即刷新" 触发 `/api/hot`,数据回来后**自动**通过 `/api/export.stream` 启动深度抓取,实时显示进度条和每条状态。
+- "⬇️ 导出 TXT" 按钮在深度抓取完成前处于 `深度抓取中 X/Y` 的禁用状态;走完后才允许点击,直接下载本地拼好的 TXT (无 emoji / URL / 关键词)。
+- 总结预览 textarea 会随深度结果实时填入摘要行。
+- 不再有"深度 / 非深度"切换——前端只走深度模式。后端 `/api/export.txt` 仍保留 `deep` 参数供 API 消费者按需取舍。
+
 ## 接口
 
 | 方法 | 路径 | 说明 |
@@ -239,7 +246,7 @@ curl "http://127.0.0.1:47821/api/export.txt?sources=36kr-renqi&limit=5&deep=true
 
 实测深度抓取效果较好的源:`tencent-hot` / `ifeng` / `thepaper` / `36kr-renqi` / `juejin` / `sspai` / `freebuf` / `nowcoder` / `chongbuluo-hot` / `github-trending-today` / `baidu` / `hupu` / `hackernews`。
 
-前端"⬇️ 导出 TXT"按钮即调用此接口,会根据当前面板的"范围 (筛选/全部)"、"附带热度"、"深度导出"开关、关键词搜索框拼接对应参数。**深度导出会自动改走 `/api/export.stream`**,边解析边显示进度。
+前端"⬇️ 导出 TXT"按钮即调用此接口,会根据当前面板的"范围 (筛选/全部)"、"附带热度"、关键词搜索框拼接对应参数。**前端不再走此 HTTP 端点导出**,而是在 `/api/hot` 后自动触发 `/api/export.stream`,完成后由前端在本地拼接 TXT 并下载。本端点保留给 API 调用方使用 (`deep=true` 等价于命令行直接拿到完整深度 TXT)。
 
 ### `GET /api/export.stream`
 
