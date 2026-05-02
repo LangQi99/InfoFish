@@ -63,7 +63,7 @@ const deepDone = ref(0)
 const deepTotal = ref(0)
 const deepItems = ref<DeepProgressItem[]>([])
 const deepSkipped = ref<string[]>([])
-// per-URL 摘要缓存,导出和总结预览都从这里取
+// per-URL 全文缓存,导出和总结预览都从这里取 (只缓存抓取成功的)
 const deepCache = ref<Map<string, string>>(new Map())
 let deepES: EventSource | null = null
 
@@ -103,27 +103,42 @@ const summaryItemCount = computed(() =>
 )
 
 const summaryText = computed(() => {
-  // 引用 deepCache 让其内容更新时重新计算
   const cache = deepCache.value
   const bs = summaryBlocks.value
   if (bs.length === 0) return ''
   const ts = fetchedAt.value ? fmtTime(fetchedAt.value) : '-'
-  const lines: string[] = []
   const filtered = summaryScope.value === 'filtered' &&
     (activeCategory.value !== '全部' || keyword.value.trim())
-  lines.push(`全网舆情速览 · ${ts}`)
-  lines.push(`共 ${bs.length} 个源 / ${summaryItemCount.value} 条热点${filtered ? ' (已过滤)' : ''}`)
-  lines.push('')
+
+  // 只保留有抓到正文的条目;空源略掉
+  const kept: { name: string; rows: { rank: number; title: string; heat: string | null; text: string }[] }[] = []
+  let total = 0
   for (const b of bs) {
-    const skipped = DEEP_BLACKLIST.has(b.source_id)
-    lines.push(`【${b.source_name}】${skipped ? '  (已跳过深度抓取)' : ''}`)
+    if (DEEP_BLACKLIST.has(b.source_id)) continue
+    const rows: { rank: number; title: string; heat: string | null; text: string }[] = []
     for (const it of b.items) {
-      const heat = summaryWithHeat.value && it.heat ? `  · ${it.heat}` : ''
-      lines.push(`${it.rank}. ${it.title}${heat}`)
-      if (!skipped) {
-        const summary = cache.get(it.url)
-        if (summary) lines.push(`   ${summary}`)
+      const text = cache.get(it.url)
+      if (text) rows.push({ rank: it.rank, title: it.title, heat: it.heat, text })
+    }
+    if (rows.length) {
+      kept.push({ name: b.source_name, rows })
+      total += rows.length
+    }
+  }
+
+  const lines: string[] = []
+  lines.push(`全网舆情速览 · ${ts}`)
+  lines.push(`共 ${kept.length} 个源 / ${total} 篇成功抓取${filtered ? ' (已过滤)' : ''}`)
+  lines.push('')
+  for (const b of kept) {
+    lines.push(`【${b.name}】`)
+    for (const r of b.rows) {
+      const heat = summaryWithHeat.value && r.heat ? `  · ${r.heat}` : ''
+      lines.push(`${r.rank}. ${r.title}${heat}`)
+      for (const ln of r.text.split('\n')) {
+        lines.push(ln.trim() ? `   ${ln}` : '')
       }
+      lines.push('')
     }
     lines.push('')
   }
@@ -190,9 +205,9 @@ function startDeep() {
       item.status = 'ok'
       item.summary = d.summary
       item.keywords = d.keywords
-      // 触发 summaryText 重算 (Map 自身不是响应式触发器,需重赋值)
+      // 缓存全文供导出使用 (Map 重新赋值才触发响应式)
       const next = new Map(deepCache.value)
-      next.set(d.url, d.summary || '')
+      next.set(d.url, d.text || d.summary || '')
       deepCache.value = next
     } else {
       item.status = 'fail'

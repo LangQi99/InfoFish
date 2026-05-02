@@ -167,27 +167,49 @@ def _render_text(
 ) -> str:
     lines: list[str] = []
     lines.append(f"全网舆情速览 · {ts_human}")
-    total = sum(len(rows) for _, _, rows in blocks)
     parts: list[str] = []
     if keyword.strip():
         parts.append("已过滤")
-    if deep:
-        ok = len([v for v in deep_map.values() if "error" not in v])
-        parts.append(f"深度 {ok}/{len(deep_map)} 成功")
     suffix = f" ({', '.join(parts)})" if parts else ""
+
+    if deep:
+        # 深度模式:只保留抓到正文的条目;空源直接省略
+        kept_blocks: list[tuple[str, list[Row]]] = []
+        kept_total = 0
+        for sid, name, rows in blocks:
+            if sid in DEEP_BLACKLIST:
+                continue
+            kept = [
+                r for r in rows
+                if r[2] in deep_map and "error" not in deep_map[r[2]]
+            ]
+            if kept:
+                kept_blocks.append((name, kept))
+                kept_total += len(kept)
+
+        lines.append(f"共 {len(kept_blocks)} 个源 / {kept_total} 篇成功抓取{suffix}")
+        lines.append("")
+        for name, rows in kept_blocks:
+            lines.append(f"【{name}】")
+            for rank, title, url, heat in rows:
+                tail = f"  · {heat}" if with_heat and heat else ""
+                lines.append(f"{rank}. {title}{tail}")
+                body = (deep_map[url].get("text") or "").strip()
+                for ln in body.splitlines():
+                    lines.append(f"   {ln}" if ln.strip() else "")
+                lines.append("")
+            lines.append("")
+        return "\n".join(lines).rstrip() + "\n"
+
+    # 非深度:沿用原逻辑,列出全部条目
+    total = sum(len(rows) for _, _, rows in blocks)
     lines.append(f"共 {len(blocks)} 个源 / {total} 条热点{suffix}")
     lines.append("")
-    for sid, name, rows in blocks:
-        skipped = deep and sid in DEEP_BLACKLIST
-        tag = "  (已跳过深度抓取)" if skipped else ""
-        lines.append(f"【{name}】{tag}")
-        for rank, title, url, heat in rows:
+    for _sid, name, rows in blocks:
+        lines.append(f"【{name}】")
+        for rank, title, _url, heat in rows:
             tail = f"  · {heat}" if with_heat and heat else ""
             lines.append(f"{rank}. {title}{tail}")
-            if deep and not skipped and url in deep_map:
-                info = deep_map[url]
-                if "error" not in info and info.get("summary"):
-                    lines.append(f"   {info['summary']}")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -315,6 +337,7 @@ async def export_stream(
                         "url": url, "ok": True,
                         "title": res.title,
                         "summary": res.summary,
+                        "text": res.text,
                         "keywords": res.keywords,
                         "done": done, "total": len(urls),
                     })

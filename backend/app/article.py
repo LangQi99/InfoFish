@@ -35,6 +35,7 @@ class Article:
     url: str
     title: str
     summary: str
+    text: str
     keywords: list[str]
     text_length: int
 
@@ -43,6 +44,7 @@ class Article:
             "url": self.url,
             "title": self.title,
             "summary": self.summary,
+            "text": self.text,
             "keywords": self.keywords,
             "text_length": self.text_length,
         }
@@ -109,6 +111,7 @@ def _extract(
         url=url,
         title=title,
         summary=summary,
+        text=text,
         keywords=keywords,
         text_length=len(text),
     )

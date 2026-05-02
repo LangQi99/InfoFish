@@ -217,25 +217,30 @@ curl "http://127.0.0.1:47821/api/export.txt?sources=36kr-renqi&limit=5&deep=true
 
 **深度导出 (`deep=true`)**
 
-成功的条目在标题下追加一行摘要 (源站正文起始几句,封顶 240 字);解析失败 (反爬 403、超时、SPA 占位等) 或被黑名单跳过的条目只保留标题。导出文本不含任何 emoji、URL、关键词或错误提示——保持纯文本简洁。
+导出 TXT 只保留**抓取成功**的条目:整源在黑名单的、SPA 页面被启发式拦下的、HTTP 失败的统统不进文件——失败痕迹全部丢弃,只留干净正文。每条以 `rank. 标题` 开头,后面紧跟整篇正文 (trafilatura 提取出的全文,按段落缩进 3 空格)。
 
-实现:`httpx` 抓 HTML → `trafilatura` 抽正文/标题 → 启发式校验是否真正文 → 摘要为正文前 3 句。关键词与原始 URL 仅在 SSE 进度面板与 `/api/hot` JSON 里返回,不进入 TXT。
+实现:`httpx` 抓 HTML → `trafilatura` 抽正文 → `_looks_meaningful` 启发式校验 → 全文进 SSE `progress.text` 字段;前端缓存全文,导出时本地拼接。`/api/hot` 仍只返回标题列表,关键词/摘要短串只在进度面板使用,不进 TXT。
 
 ```
-【百度热搜】
-1. 张雪机车再夺冠军
-   张雪机车，再次夺冠！上次夺冠的奖杯、复刻赛车等已被拍卖…
+全网舆情速览 · 2026-05-02 23:20:45
+共 2 个源 / 3 篇成功抓取
 
-【B站热搜】
-1. AL战胜IG LPL第二赛段
-2. EDG战胜DRG VCT第一赛段
+【百度热搜】
+2. 张雪回应第3冠：我说牛 谁不服
+   张雪回应"张雪机车"第3冠："我说牛，谁不服？"…
+   对此，张雪机车创始人张雪在社交媒体回应…
+
+【腾讯新闻】
+1. 张雪机车再夺一冠！张雪：我说牛x谁不服?
+   快科技5月2日消息，今日，世界超级摩托车锦标赛(WSBK)…
+   ...
 ```
 
 注意事项:
 - 深度导出会真去逐条抓 URL,**比普通导出慢得多**;`deep_limit` 默认 `500` 等于"全量",可按需要减小
 - 部分平台 (微博 / 知乎 / 抖音 / 头条 等) 反爬严格,大概率 403 / JS 渲染拿不到正文,这是正常现象
 - 内存中没有为深度结果做缓存,重复请求会重复抓取
-- TXT 输出只保留 标题 + 摘要,无 emoji / URL / 关键词 / 失败提示;如需查看请用 SSE 接口或前端进度面板
+- TXT 只收录抓取成功的条目,整篇正文按缩进塞入,不输出 URL / 关键词 / 错误提示
 
 **深度抓取过滤策略**
 
@@ -255,7 +260,7 @@ curl "http://127.0.0.1:47821/api/export.txt?sources=36kr-renqi&limit=5&deep=true
 | event | data 字段 | 触发时机 |
 | --- | --- | --- |
 | `meta` | `{ total, urls: [{url,title,source}], filename, deep, skipped_sources }` | 请求开始,告知前端有几个 URL 要解析。`skipped_sources` 是被黑名单跳过的源名列表 |
-| `progress` | `{ url, ok, done, total, title?, summary?, keywords?, error? }` | 每完成一条 (按完成顺序,不一定按输入顺序) |
+| `progress` | `{ url, ok, done, total, title?, summary?, text?, keywords?, error? }` | 每完成一条 (按完成顺序,不一定按输入顺序);`text` 是 trafilatura 提取的整篇正文 |
 | `done` | `{ text, filename }` | 全部完成,返回最终拼好的 TXT 文本与建议文件名 |
 | `error` | `{ detail }` | 上游错误,流终止 |
 
