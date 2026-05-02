@@ -44,7 +44,7 @@ let timer: number | null = null
 const summaryOpen = ref(true)
 const summaryScope = ref<'filtered' | 'all'>('filtered')
 const summaryWithHeat = ref(false)
-const copyTip = ref('')
+const exportTip = ref('')
 
 const categories = computed(() => {
   const set = new Set(sources.value.map(s => s.category))
@@ -105,15 +105,28 @@ const summaryText = computed(() => {
   return lines.join('\n').trimEnd()
 })
 
-async function copySummary() {
-  if (!summaryText.value) return
+async function exportSummary() {
+  if (summaryItemCount.value === 0) return
   try {
-    await navigator.clipboard.writeText(summaryText.value)
-    copyTip.value = '✓ 已复制'
+    const params = new URLSearchParams()
+    params.set('limit', '20')
+    if (summaryWithHeat.value) params.set('with_heat', 'true')
+    if (summaryScope.value === 'filtered') {
+      const ids = summaryBlocks.value.map(b => b.source_id)
+      for (const id of ids) params.append('sources', id)
+      const kw = keyword.value.trim()
+      if (kw) params.set('keyword', kw)
+    }
+    const a = document.createElement('a')
+    a.href = `/api/export.txt?${params.toString()}`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    exportTip.value = '✓ 已导出'
   } catch {
-    copyTip.value = '复制失败,请手动选择'
+    exportTip.value = '导出失败'
   }
-  setTimeout(() => (copyTip.value = ''), 2000)
+  setTimeout(() => (exportTip.value = ''), 2000)
 }
 
 async function loadSources() {
@@ -203,8 +216,8 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
             <input type="checkbox" v-model="summaryWithHeat" /> 附带热度
           </label>
           <span style="flex:1"></span>
-          <span v-if="copyTip" style="color:var(--accent-2);font-size:12px">{{ copyTip }}</span>
-          <button :disabled="!summaryText" @click="copySummary">📋 复制</button>
+          <span v-if="exportTip" style="color:var(--accent-2);font-size:12px">{{ exportTip }}</span>
+          <button :disabled="summaryItemCount === 0" @click="exportSummary">⬇️ 导出 TXT</button>
         </div>
         <textarea class="summary-text" :value="summaryText" readonly spellcheck="false"></textarea>
       </div>
