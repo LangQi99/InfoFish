@@ -106,8 +106,17 @@ def _item_dict(it: HotItem, rank: int) -> dict[str, Any]:
 
 # 行格式: (rank, title, url, heat)
 Row = tuple[int, str, str, str | None]
-# 块格式: (source_name, [Row, ...])
-RenderedBlock = tuple[str, list[Row]]
+# 块格式: (source_id, source_name, [Row, ...])
+RenderedBlock = tuple[str, str, list[Row]]
+
+# 深度导出黑名单:这些源链接是搜索/SPA 入口、商店页、或反爬严格,深度抓取无意义。
+# 普通 TXT 导出仍然正常包含它们,只是不会再去逐条抓 URL。
+# 其它"伪正文"页 (抖音/B站/豆瓣等 SPA) 由 article._looks_meaningful 兜底拦截。
+DEEP_BLACKLIST: frozenset[str] = frozenset({
+    "weibo", "zhihu", "producthunt",  # 链接是搜索/SPA 入口或反爬 403
+    "steam",                           # Steam 商店页 (多语言菜单,无文章)
+    "tieba",                           # 贴吧帖混入大量用户名导航,信噪比低
+})
 
 
 def _collect_rows(
@@ -127,15 +136,18 @@ def _collect_rows(
                 continue
             rows.append((idx, it.title, it.url, it.heat))
         if rows:
-            blocks.append((SOURCE_NAME_BY_ID.get(sid, sid), rows))
+            blocks.append((sid, SOURCE_NAME_BY_ID.get(sid, sid), rows))
             total += len(rows)
     return blocks, total
 
 
 def _flatten_urls(blocks: list[RenderedBlock], cap: int) -> list[str]:
+    """收集深度导出待抓 URL,跳过黑名单源。"""
     out: list[str] = []
     seen: set[str] = set()
-    for _, rows in blocks:
+    for sid, _, rows in blocks:
+        if sid in DEEP_BLACKLIST:
+            continue
         for _, _, url, _ in rows:
             if url and url not in seen:
                 seen.add(url)
@@ -155,7 +167,7 @@ def _render_text(
 ) -> str:
     lines: list[str] = []
     lines.append(f"🔥 全网舆情速览 · {ts_human}")
-    total = sum(len(rows) for _, rows in blocks)
+    total = sum(len(rows) for _, _, rows in blocks)
     parts: list[str] = []
     if keyword.strip():
         parts.append("已过滤")
@@ -165,12 +177,14 @@ def _render_text(
     suffix = f" ({', '.join(parts)})" if parts else ""
     lines.append(f"共 {len(blocks)} 个源 / {total} 条热点{suffix}")
     lines.append("")
-    for name, rows in blocks:
-        lines.append(f"【{name}】")
+    for sid, name, rows in blocks:
+        skipped = deep and sid in DEEP_BLACKLIST
+        tag = "  (已跳过深度抓取)" if skipped else ""
+        lines.append(f"【{name}】{tag}")
         for rank, title, url, heat in rows:
             tail = f"  · {heat}" if with_heat and heat else ""
             lines.append(f"{rank}. {title}{tail}")
-            if deep and url in deep_map:
+            if deep and not skipped and url in deep_map:
                 info = deep_map[url]
                 lines.append(f"   🔗 {url}")
                 if "error" in info:
@@ -270,18 +284,24 @@ async def export_stream(
         # 给前端一份 url->title 映射,渲染进度列表
         url_meta: list[dict[str, str]] = []
         seen: set[str] = set()
-        for src_name, rows in blocks:
+        for _, src_name, rows in blocks:
             for _, title, url, _ in rows:
                 if url and url in urls and url not in seen:
                     seen.add(url)
                     url_meta.append({"url": url, "title": title, "source": src_name})
 
         filename = _filename(deep, now)
+        skipped_sources = [
+            SOURCE_NAME_BY_ID.get(sid, sid)
+            for sid, _, _ in blocks
+            if deep and sid in DEEP_BLACKLIST
+        ]
         yield _sse("meta", {
             "total": len(urls),
             "urls": url_meta,
             "filename": filename,
             "deep": deep,
+            "skipped_sources": skipped_sources,
         })
 
         deep_map: dict[str, dict[str, Any]] = {}

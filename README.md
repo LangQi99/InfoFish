@@ -228,6 +228,15 @@ curl "http://127.0.0.1:47821/api/export.txt?sources=36kr-renqi&limit=5&deep=true
 - 内存中没有为深度结果做缓存,重复请求会重复抓取
 - 标题第二行的 `📝` 段是源站正文起始几句,不是 LLM 生成的语义摘要
 
+**深度抓取过滤策略**
+
+实测后端会从两个层面过滤掉无意义的深度抓取:
+
+- **黑名单 (在 `app/main.py` 的 `DEEP_BLACKLIST`)**:链接指向搜索/SPA 入口或反爬严格的源,深度阶段直接跳过 (普通 TXT 导出仍正常列出标题)。当前包含:`weibo` / `zhihu` / `producthunt` / `steam` / `tieba`。
+- **启发式 (在 `app/article._looks_meaningful`)**:抓回正文后过短 (<100 字)、短行占比过高 (>40%) 或平均行长过短 (<8 字) 的页面判为 "非有效正文",落到 `⚠️ 解析失败`。这样兜底 SPA 页面 (`toutiao` / `douyin` / `bilibili-hot-search` / `douban` / `coolapk` 等)。
+
+实测深度抓取效果较好的源:`tencent-hot` / `ifeng` / `thepaper` / `36kr-renqi` / `juejin` / `sspai` / `freebuf` / `nowcoder` / `chongbuluo-hot` / `github-trending-today` / `baidu` / `hupu` / `hackernews`。
+
 前端"⬇️ 导出 TXT"按钮即调用此接口,会根据当前面板的"范围 (筛选/全部)"、"附带热度"、"深度导出"开关、关键词搜索框拼接对应参数。**深度导出会自动改走 `/api/export.stream`**,边解析边显示进度。
 
 ### `GET /api/export.stream`
@@ -236,7 +245,7 @@ curl "http://127.0.0.1:47821/api/export.txt?sources=36kr-renqi&limit=5&deep=true
 
 | event | data 字段 | 触发时机 |
 | --- | --- | --- |
-| `meta` | `{ total, urls: [{url,title,source}], filename, deep }` | 请求开始,告知前端有几个 URL 要解析 |
+| `meta` | `{ total, urls: [{url,title,source}], filename, deep, skipped_sources }` | 请求开始,告知前端有几个 URL 要解析。`skipped_sources` 是被黑名单跳过的源名列表 |
 | `progress` | `{ url, ok, done, total, title?, summary?, keywords?, error? }` | 每完成一条 (按完成顺序,不一定按输入顺序) |
 | `done` | `{ text, filename }` | 全部完成,返回最终拼好的 TXT 文本与建议文件名 |
 | `error` | `{ detail }` | 上游错误,流终止 |

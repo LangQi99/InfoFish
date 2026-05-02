@@ -60,6 +60,7 @@ const deepRunning = ref(false)
 const deepDone = ref(0)
 const deepTotal = ref(0)
 const deepItems = ref<DeepProgressItem[]>([])
+const deepSkipped = ref<string[]>([])
 let deepES: EventSource | null = null
 
 const categories = computed(() => {
@@ -172,6 +173,7 @@ async function exportSummary() {
   deepDone.value = 0
   deepTotal.value = 0
   deepItems.value = []
+  deepSkipped.value = []
   exportTip.value = ''
 
   const es = new EventSource(`/api/export.stream?${params.toString()}`)
@@ -181,6 +183,7 @@ async function exportSummary() {
   es.addEventListener('meta', e => {
     const d = JSON.parse((e as MessageEvent).data)
     deepTotal.value = d.total
+    deepSkipped.value = d.skipped_sources || []
     deepItems.value = d.urls.map((u: any, i: number) => {
       idx[u.url] = i
       return { url: u.url, title: u.title, source: u.source, status: 'pending' as const }
@@ -327,6 +330,9 @@ onUnmounted(() => {
         </div>
 
         <div v-if="deepRunning || deepItems.length > 0" class="deep-panel">
+          <div v-if="deepSkipped.length" class="deep-skipped">
+            ℹ️ 已跳过深度抓取 (反爬/SPA):{{ deepSkipped.join('、') }}
+          </div>
           <div class="deep-bar-wrap">
             <div
               class="deep-bar"

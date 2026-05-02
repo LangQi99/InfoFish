@@ -100,6 +100,9 @@ def _extract(
     if not text:
         raise ArticleError("正文为空")
 
+    if not _looks_meaningful(text):
+        raise ArticleError("非有效正文 (页面骨架/导航/加载占位)")
+
     summary = _summarize(text, summary_sentences, summary_max_chars)
     keywords = _keywords(title + "。" + text, keyword_top_k)
     return Article(
@@ -111,8 +114,24 @@ def _extract(
     )
 
 
+def _looks_meaningful(text: str) -> bool:
+    """过滤伪正文 (SPA 骨架 / 导航条 / "加载中" 占位)。"""
+    s = text.strip()
+    if len(s) < 100:
+        return False
+    lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
+    if len(lines) < 2:
+        return False
+    short_lines = sum(1 for ln in lines if len(ln) <= 3)
+    if short_lines / len(lines) > 0.4:
+        return False
+    avg_len = sum(len(ln) for ln in lines) / len(lines)
+    if avg_len < 8:
+        return False
+    return True
+
+
 def _summarize(text: str, n: int, max_chars: int) -> str:
-    # 优先按段落首 N 句拼接
     sents = [s.strip() for s in _SENT_SPLIT.split(text) if s.strip()]
     if not sents:
         return text[:max_chars]
